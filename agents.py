@@ -18,7 +18,7 @@ import re
 import random
 
 class RealEstateAgent:
-    def __init__(self):
+    def __init__(self, initial_phone=None):
         self.llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0.7)
         self.memory = []  # Simple list to store messages
         self.company_name = "Elite Properties"  # You can change this to your company name
@@ -26,7 +26,7 @@ class RealEstateAgent:
             "UID": None,  # Will be auto-generated
             "Name": None,
             "Email": None,
-            "Phone": None,
+            "Phone": initial_phone,  # Set initial phone number
             "Company": None,
             "Position": None,
             "Industry": None,
@@ -58,7 +58,7 @@ class RealEstateAgent:
         self.call_in_progress = False
         self.last_question_field = None  # Track what field we last asked about
         self.consecutive_misses = 0  # Track how many times we've asked without getting an answer
-        self.skipped_fields = {"Interest Level", "Use Case", "Competitors", "Call Outcome", "Notes"}  # Fields automatically determined by LLM
+        self.skipped_fields = {"Interest Level", "Use Case", "Competitors", "Call Outcome", "Notes", "Phone"}  # Added Phone to skipped fields
         self.existing_lead_checked = False  # Track if we've checked for an existing lead
 
     def generate_uid(self):
@@ -934,3 +934,31 @@ class RealEstateAgent:
             print(f"Error checking for existing lead: {e}")
             
         return False
+
+def main():
+    from interface import get_phone_number
+    
+    # Get phone number before starting conversation
+    phone_number = get_phone_number()
+    if not phone_number:
+        print("No phone number provided. Exiting...")
+        return
+        
+    # Initialize agent with phone number
+    agent = RealEstateAgent(initial_phone=phone_number)
+    
+    # Start conversation
+    print("\nStarting conversation...")
+    response = agent.process_message("")
+    print(f"Agent: {response}")
+    
+    while True:
+        user_input = input("You: ")
+        if user_input.lower() in ['quit', 'exit', 'bye']:
+            break
+            
+        response = agent.process_message(user_input)
+        print(f"Agent: {response}")
+
+if __name__ == "__main__":
+    main()

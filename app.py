@@ -1,6 +1,7 @@
 # app.py
 
 import streamlit as st
+import re
 from agents import RealEstateAgent
 from prompts import GREETING_PROMPT, FOLLOW_UP_PROMPT, COMPLETION_PROMPT, ERROR_PROMPT
 import json
@@ -8,6 +9,15 @@ import json
 # Optional: ElevenLabs TTS (uncomment if you enable audio)
 # from elevenlabs import generate, play, set_api_key
 # set_api_key(os.getenv("ELEVEN_API_KEY"))
+
+def validate_phone(phone):
+    # Remove any non-digit characters
+    phone = re.sub(r'\D', '', phone)
+    
+    # Check if it's a valid length (7-15 digits)
+    if len(phone) < 7 or len(phone) > 15:
+        return False
+    return phone
 
 # Set up page
 st.set_page_config(
@@ -34,98 +44,131 @@ st.markdown("""
         background-color: #45a049;
     }
     </style>
-    """, unsafe_allow_html=True)
-
-# Header
-st.title("🏠 Real Estate Assistant")
-st.markdown("""
-    Welcome! I'm here to help you find the perfect property. 
-    Whether you're looking for a home or commercial space, I'll guide you through the process.
-""")
+""", unsafe_allow_html=True)
 
 # Initialize session state
+if 'phone_number' not in st.session_state:
+    st.session_state.phone_number = None
 if 'agent' not in st.session_state:
-    st.session_state.agent = RealEstateAgent()
+    st.session_state.agent = None
 if 'messages' not in st.session_state:
     st.session_state.messages = []
-    # Add initial greeting
-    initial_message = st.session_state.agent.process_message("")
-    st.session_state.messages.append({"role": "assistant", "content": initial_message})
 
-# Chat interface
-chat_container = st.container()
-with chat_container:
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+# Phone number input screen
+if not st.session_state.phone_number:
+    st.title("🏠 Real Estate Assistant")
+    st.markdown("### Enter Phone Number to Start Call")
+    
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        phone_input = st.text_input("Phone Number", placeholder="Enter phone number (7-15 digits)")
+    with col2:
+        if st.button("Start Call", use_container_width=True):
+            phone = validate_phone(phone_input)
+            if phone:
+                st.session_state.phone_number = phone
+                st.session_state.agent = RealEstateAgent(initial_phone=phone)
+                st.rerun()
+            else:
+                st.error("Please enter a valid phone number (7-15 digits)")
 
-# User input
-if prompt := st.chat_input("Type your message here..."):
-    # Add user message to chat
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
+# Main chat interface
+else:
+    # Header
+    st.title("🏠 Real Estate Assistant")
+    st.markdown("""
+        Welcome! I'm here to help you find the perfect property. 
+        Whether you're looking for a home or commercial space, I'll guide you through the process.
+    """)
     
-    # Process message and get response (extraction happens inside process_message now)
-    response = st.session_state.agent.process_message(prompt)
+    # Display phone number
+    st.markdown(f"**Calling:** {st.session_state.phone_number}")
     
-    # Add assistant response to chat
-    st.session_state.messages.append({"role": "assistant", "content": response})
-    with st.chat_message("assistant"):
-        st.markdown(response)
-    
-    # Check if we have enough information to log
-    if st.session_state.agent.is_ready_to_log():
-        if st.session_state.agent.log_to_sheet():
-            st.success("✅ Lead information has been saved! Our team will contact you soon.")
-        else:
-            # Still show success but with a different message since we save locally as backup
-            st.success("✅ Lead information has been saved locally. Our team will review it soon.")
+    # Add initial greeting if this is the first message
+    if not st.session_state.messages:
+        initial_message = st.session_state.agent.process_message("")
+        st.session_state.messages.append({"role": "assistant", "content": initial_message})
 
-# Sidebar with information
-with st.sidebar:
-    st.header("Information Gathered")
-    if st.session_state.agent.required_fields:
-        # Group fields by category based on sheets column order
-        lead_info = ["Name", "Email", "Phone"]
-        property_info = ["Location", "Budget Range", "Property Type", "Property Size", "Timeline"]
-        status_info = ["Interest Level", "Status", "Created Date", "Last Contact Date"]
-        business_info = ["Company", "Position", "Industry", "Company Size", "Decision Maker"]
-        additional_info = ["Use Case", "Competitors", "Call Outcome", "Notes", "Lead Source", "Follow-up Required", "Next Follow-up"]
+    chat_container = st.container()
+    with chat_container:
+        for message in st.session_state.messages:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+
+    # User input
+    if prompt := st.chat_input("Type your message here..."):
+        # Add user message to chat
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
         
-        # Display fields by category
-        st.subheader("Lead Information")
-        for field in lead_info:
-            value = st.session_state.agent.required_fields.get(field, "Not provided")
-            st.text(f"{field}: {value}")
+        # Process message and get response (extraction happens inside process_message now)
+        response = st.session_state.agent.process_message(prompt)
         
-        st.subheader("Property Details")
-        for field in property_info:
-            value = st.session_state.agent.required_fields.get(field, "Not provided")
-            st.text(f"{field}: {value}")
+        # Add assistant response to chat
+        st.session_state.messages.append({"role": "assistant", "content": response})
+        with st.chat_message("assistant"):
+            st.markdown(response)
+        
+        # Check if we have enough information to log
+        if st.session_state.agent.is_ready_to_log():
+            if st.session_state.agent.log_to_sheet():
+                st.success("✅ Lead information has been saved! Our team will contact you soon.")
+            else:
+                # Still show success but with a different message since we save locally as backup
+                st.success("✅ Lead information has been saved locally. Our team will review it soon.")
+
+    # Sidebar with information
+    with st.sidebar:
+        st.header("Information Gathered")
+        if st.session_state.agent.required_fields:
+            # Group fields by category based on sheets column order
+            lead_info = ["Name", "Email", "Phone"]
+            property_info = ["Location", "Budget Range", "Property Type", "Property Size", "Timeline"]
+            status_info = ["Interest Level", "Status", "Created Date", "Last Contact Date"]
+            business_info = ["Company", "Position", "Industry", "Company Size", "Decision Maker"]
+            additional_info = ["Use Case", "Competitors", "Call Outcome", "Notes", "Lead Source", "Follow-up Required", "Next Follow-up"]
             
-        st.subheader("Lead Status")
-        # Add Lead Type (residential/commercial)
-        st.text(f"Lead Type: {st.session_state.agent.lead_type or 'Not determined'}")
-        for field in status_info:
-            value = st.session_state.agent.required_fields.get(field, "Not provided")
-            st.text(f"{field}: {value}")
+            # Display fields by category
+            st.subheader("Lead Information")
+            for field in lead_info:
+                value = st.session_state.agent.required_fields.get(field, "Not provided")
+                st.text(f"{field}: {value}")
+            
+            st.subheader("Property Details")
+            for field in property_info:
+                value = st.session_state.agent.required_fields.get(field, "Not provided")
+                st.text(f"{field}: {value}")
+                
+            st.subheader("Lead Status")
+            # Add Lead Type (residential/commercial)
+            st.text(f"Lead Type: {st.session_state.agent.lead_type or 'Not determined'}")
+            for field in status_info:
+                value = st.session_state.agent.required_fields.get(field, "Not provided")
+                st.text(f"{field}: {value}")
+            
+            st.subheader("Business Information")
+            for field in business_info:
+                value = st.session_state.agent.required_fields.get(field, "Not provided")
+                st.text(f"{field}: {value}")
+            
+            st.subheader("Additional Details")
+            for field in additional_info:
+                value = st.session_state.agent.required_fields.get(field, "Not provided")
+                st.text(f"{field}: {value}")
+            
+            # Show completion status
+            essential_fields = ["Name", "Email", "Phone", "Location", "Budget Range", "Property Type", "Property Size", "Timeline"]
+            missing_essential = [f for f in essential_fields if not st.session_state.agent.required_fields.get(f) or st.session_state.agent.required_fields.get(f) == "Not provided"]
+            
+            if missing_essential:
+                st.warning(f"Still need: {', '.join(missing_essential)}")
+            else:
+                st.success("All essential information gathered!")
         
-        st.subheader("Business Information")
-        for field in business_info:
-            value = st.session_state.agent.required_fields.get(field, "Not provided")
-            st.text(f"{field}: {value}")
-        
-        st.subheader("Additional Details")
-        for field in additional_info:
-            value = st.session_state.agent.required_fields.get(field, "Not provided")
-            st.text(f"{field}: {value}")
-        
-        # Show completion status
-        essential_fields = ["Name", "Email", "Phone", "Location", "Budget Range", "Property Type", "Property Size", "Timeline"]
-        missing_essential = [f for f in essential_fields if not st.session_state.agent.required_fields.get(f) or st.session_state.agent.required_fields.get(f) == "Not provided"]
-        
-        if missing_essential:
-            st.warning(f"Still need: {', '.join(missing_essential)}")
-        else:
-            st.success("All essential information gathered!")
+        # Add a button to end call
+        if st.button("End Call", type="primary"):
+            st.session_state.phone_number = None
+            st.session_state.agent = None
+            st.session_state.messages = []
+            st.rerun()
