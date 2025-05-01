@@ -9,7 +9,7 @@ from prompts import (
     ERROR_PROMPT
 )
 
-from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, AIMessage, messages_from_dict, messages_to_dict
 import uuid
 from datetime import datetime, timedelta
@@ -19,7 +19,7 @@ import random
 
 class RealEstateAgent:
     def __init__(self):
-        self.llm = ChatOpenAI(temperature=0.7, model="gpt-4")
+        self.llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0.7)
         self.memory = []  # Simple list to store messages
         self.company_name = "Elite Properties"  # You can change this to your company name
         self.required_fields = {
@@ -171,6 +171,9 @@ class RealEstateAgent:
             Only include fields that are explicitly mentioned or can be reasonably inferred from the message.
             If no new information is found, return an empty object {{}}."""
             
+            print("\n=== DEBUG: Starting LLM extraction ===")
+            print(f"Message to extract from: {message}")
+            
             # Use invoke instead of predict
             response = self.llm.invoke(extraction_prompt)
             
@@ -180,9 +183,17 @@ class RealEstateAgent:
             else:
                 content = str(response)
             
+            print(f"Raw LLM response: {content}")
+            
             try:
+                # Strip markdown formatting if present
+                if content.startswith('```'):
+                    # Remove the first line (```json or similar) and last line (```)
+                    content = '\n'.join(content.split('\n')[1:-1])
+                
                 # Try to parse as JSON
                 info_dict = json.loads(content)
+                print(f"Parsed JSON: {info_dict}")
                 
                 # Update fields with new information from LLM
                 if info_dict and isinstance(info_dict, dict):
@@ -192,8 +203,11 @@ class RealEstateAgent:
                             self.required_fields[field] = value
                             print(f"Updated {field} = {value}")
                             extracted_something = True
-            except json.JSONDecodeError:
+                        else:
+                            print(f"Skipped field {field} because: {'field not in required_fields' if field not in self.required_fields else 'value is empty'}")
+            except json.JSONDecodeError as e:
                 print(f"Failed to parse JSON: {content}")
+                print(f"JSON Error: {str(e)}")
                 
                 # Only use direct answer extraction if LLM fails and we don't have a lead type yet
                 if not self.lead_type:
@@ -294,7 +308,7 @@ class RealEstateAgent:
                 self.memory.append(AIMessage(content=response))
                 return response
 
-        # Extract information from the user's message - this will also set lead type if detected
+        # Extract information from the user's message
         extracted = self.extract_info(message)
 
         # Check for existing lead once we have an email
@@ -305,167 +319,176 @@ class RealEstateAgent:
         # Update timestamps
         self.update_timestamps()
         
-        # Get remaining fields to gather AFTER extracting information
+        # Get remaining fields to gather
         remaining_fields = [f for f in self.get_remaining_fields() if f not in self.skipped_fields]
         
-        # Update consecutive misses counter
-        if self.last_question_field and extracted:
-            # Reset consecutive misses if we got any information
-            self.consecutive_misses = 0
-        elif self.last_question_field:
-            # Increment consecutive misses if we didn't get an answer
-            self.consecutive_misses += 1
-            
-        # If we asked the same thing without getting an answer, skip this field and move on
-        if self.consecutive_misses >= 1:
-            print(f"Skipping {self.last_question_field} after {self.consecutive_misses} attempts")
-            # Add the field to the skipped list
-            if self.last_question_field:
-                self.skipped_fields.add(self.last_question_field)
-                # Set a default value for essential fields
-                if self.last_question_field in ["Name", "Email", "Phone", "Location", "Budget Range", "Property Type", "Property Size", "Timeline"]:
-                    self.required_fields[self.last_question_field] = "Not provided"
-            self.consecutive_misses = 0
-        
-        # Check if we have all essential fields or if remaining fields are only non-essential
+        # Check if we have all essential fields
         essential_fields = ["Name", "Email", "Phone", "Location", "Budget Range", "Property Type", "Property Size", "Timeline"]
         essential_remaining = [f for f in remaining_fields if f in essential_fields]
         
-        # If we're ready to wrap up, infer remaining fields from context
-        if (not essential_remaining or not remaining_fields) and len(self.memory) >= 4:
-            self._infer_missing_fields_from_context()
+        # If we have all essential fields, try to infer more information and handle scheduling
+        if not essential_remaining:
+            print("\nAll essential information collected. Inferring additional details and handling scheduling...")
+            
+            # First, infer any missing information from the conversation
+            inference_prompt = f"""Based on this conversation, infer any missing information and preferences.
+
+            Conversation history:
+            {[f"{'User' if isinstance(msg, HumanMessage) else 'Agent'}: {msg.content}" for msg in self.memory]}
+            
+            Current information:
+            {self.required_fields}
+            
+            Lead type: {self.lead_type}
+            
+            Please infer:
+            1. Use Case (how they plan to use the property)
+            2. Decision Maker (who makes the final decision)
+            3. Interest Level (Hot/Warm/Cold based on urgency and engagement)
+            4. Any specific preferences or requirements mentioned
+            5. Their preferred contact method
+            
+            Return as JSON:
+            {{
+                "Use Case": "inferred use case",
+                "Decision Maker": "inferred decision maker",
+                "Interest Level": "inferred level",
+                "Notes": "any specific preferences or requirements",
+                "Contact Method": "preferred contact method"
+            }}"""
+            
+            try:
+                inference_response = self.llm.invoke(inference_prompt)
+                if hasattr(inference_response, 'content'):
+                    inferred_info = json.loads(inference_response.content)
+                    for field, value in inferred_info.items():
+                        if field in self.required_fields and (self.required_fields[field] is None or self.required_fields[field] == "Not provided"):
+                            self.required_fields[field] = value
+                            print(f"Inferred {field}: {value}")
+            except Exception as e:
+                print(f"Error inferring information: {e}")
+            
+            # If we don't have scheduling information yet, ask about it
+            if not self.required_fields.get("Availability") and not self.required_fields.get("Next Follow-up"):
+                scheduling_prompt = f"""Based on this conversation, generate a natural question about scheduling a viewing or meeting.
+                
+                Information gathered:
+                {self.required_fields}
+                
+                Lead type: {self.lead_type}
+                
+                The question should:
+                1. Be brief and direct
+                2. Reference their property type and location
+                3. Ask about their preferred time for viewing/meeting
+                4. Be friendly but professional
+                
+                Keep it to one sentence."""
+                
+                try:
+                    scheduling_response = self.llm.invoke(scheduling_prompt)
+                    response = scheduling_response.content if hasattr(scheduling_response, 'content') else str(scheduling_response)
+                    self.memory.append(AIMessage(content=response))
+                    return response
+                except Exception as e:
+                    print(f"Error generating scheduling question: {e}")
+                    response = "When would be a good time for you to view some properties?"
+                    self.memory.append(AIMessage(content=response))
+                    return response
+            
+            # If we have scheduling information, proceed with logging
+            print("\nLogging to sheets...")
             self._generate_follow_up_plan()
             
-            # All essential fields gathered or no remaining fields
+            # Set final status
             self.required_fields["Call Outcome"] = "Information Gathered"
             self.required_fields["Follow-up Required"] = "Yes" if self.required_fields["Interest Level"] in ["Hot", "Warm"] else "No"
             
-            if not self.required_fields["Next Follow-up"] and self.required_fields["Follow-up Required"] == "Yes":
-                # Set follow-up date based on interest level
-                if self.required_fields["Interest Level"] == "Hot":
-                    self.required_fields["Next Follow-up"] = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
-                else:  # Warm
-                    self.required_fields["Next Follow-up"] = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d")
-            
-            # Fill in any remaining essential fields with defaults
-            for field in essential_fields:
-                if not self.required_fields.get(field):
-                    self.required_fields[field] = "Not provided"
-            
             # Log to Google Sheets
             try:
-                self.log_to_sheet()
+                success = self.log_to_sheet()
+                if success:
+                    # Generate a brief completion message
+                    completion_prompt = f"""Generate a brief, friendly completion message for this real estate conversation.
+                    
+                    Information gathered:
+                    {self.required_fields}
+                    
+                    Lead type: {self.lead_type}
+                    
+                    The message should:
+                    1. Be very brief and to the point
+                    2. Thank them for their time
+                    3. Confirm the next steps (viewing/meeting time if scheduled)
+                    4. Not repeat any information they provided
+                    
+                    Keep it under 2 sentences."""
+                    
+                    try:
+                        completion_response = self.llm.invoke(completion_prompt)
+                        response = completion_response.content if hasattr(completion_response, 'content') else str(completion_response)
+                    except Exception as e:
+                        print(f"Error generating completion message: {e}")
+                        response = "Thank you for your time. I'll be in touch with property options that match your requirements."
+                else:
+                    response = "I've gathered your information. However, I'm having trouble saving it at the moment. Please try again later."
             except Exception as e:
-                print(f"Error logging to Google Sheets: {e}")
+                print(f"Error in completion process: {e}")
+                response = "I've gathered your information. However, I'm having trouble saving it at the moment. Please try again later."
             
-            # Customize completion message with name and contact method if available
-            completion_name = ""
-            if self.required_fields["Name"] and self.required_fields["Name"] != "Not provided":
-                completion_name = f"{self.required_fields['Name']}, "
-            
-            completion_contact = ""
-            if self.required_fields["Email"] and self.required_fields["Email"] != "Not provided":
-                completion_contact = f" via {self.required_fields['Email']}"
-            elif self.required_fields["Phone"] and self.required_fields["Phone"] != "Not provided":
-                completion_contact = f" via your phone {self.required_fields['Phone']}"
-            
-            property_type = self.required_fields.get("Property Type", "properties")
-            location = self.required_fields.get("Location", "areas you mentioned")
-
-            response = COMPLETION_PROMPT.format(
-                property_type=property_type,
-                location=location,
-                completion_name=completion_name,
-                completion_contact=completion_contact
-            )
             self.memory.append(AIMessage(content=response))
             return response
         
-        # Get a contextually appropriate response using AI to ensure coherent follow-up
-        conversation_context = "\n".join([
-            f"Current conversation context:",
-            f"- Lead type: {self.lead_type or 'Unknown'}",
-            f"- We know their name: {'Yes' if self.required_fields['Name'] else 'No'}",
-            f"- We know their contact: {'Yes' if self.required_fields['Email'] or self.required_fields['Phone'] else 'No'}",
-            f"- Information gathered so far: {', '.join([f'{k}: {v}' for k, v in self.required_fields.items() if v and k != 'UID'])}",
-            f"- We last asked about: {self.last_question_field or 'Nothing yet'}"
-        ])
+        # If we don't have all essential fields, continue the conversation
+        # Generate a natural, contextual response using LLM
+        conversation_prompt = f"""Generate a natural, conversational response for this real estate conversation.
         
-        # Generate a more human, conversational response based on context
-        # Choose the next field to ask about from remaining essential fields first
-        if essential_remaining:
-            next_field = essential_remaining[0]
-            for field in ["Location", "Budget Range", "Property Type", "Property Size", "Timeline"]:
-                if field in essential_remaining:
-                    next_field = field
-                    break
-        else:
-            # Use priority order for non-essential fields
-            priority_order = [
-                "Company", "Position", "Industry", "Company Size",
-                "Decision Maker", "Availability"
-            ]
-            next_field = next((f for f in priority_order if f in remaining_fields), remaining_fields[0])
+        Conversation history:
+        {[f"{'User' if isinstance(msg, HumanMessage) else 'Agent'}: {msg.content}" for msg in self.memory]}
         
-        # Get a question for this field
-        next_question = self._get_question_for_field(next_field)
+        Information gathered so far:
+        {self.required_fields}
         
-        # Generate a conversational transition
-        transitions = [
-            "I understand. ",
-            "Thanks for sharing that. ",
-            "That's helpful to know. ",
-            "I appreciate you telling me that. ",
-            "That makes sense. ",
-            "I see. ",
-            "Great! ",
-            "Interesting. "
-        ]
+        Lead type: {self.lead_type}
+        Last question field: {self.last_question_field}
         
-        acknowledgments = [
-            "By the way, ",
-            "I'm curious, ",
-            "If you don't mind my asking, ",
-            "To help me find the perfect property for you, ",
-            "So I can better assist you, ",
-            "To narrow down some options, "
-        ]
+        Remaining fields to gather: {remaining_fields}
         
-        # Make responses more conversational based on context
-        transition = random.choice(transitions) if random.random() > 0.3 else ""
-        acknowledgment = random.choice(acknowledgments) if random.random() > 0.5 else ""
+        The response should:
+        1. Be concise and to the point
+        2. Only acknowledge what they just said if it's particularly relevant
+        3. Ask about one of the remaining fields in a natural way
+        4. Avoid repeating information they've already provided
+        5. Be warm and professional but brief
+        6. Not feel like a template or form
         
-        if self.required_fields["Name"]:
-            # If we know their name, use it occasionally but not every time (seems unnatural)
-            if random.random() < 0.3 and "?" in next_question:
-                response = f"{transition}{self.required_fields['Name']}, {acknowledgment}{next_question.lower()}"
-            else:
-                response = f"{transition}{acknowledgment}{next_question}"
-        else:
-            response = f"{transition}{acknowledgment}{next_question}"
-
-        # For timeline questions, make it extra conversational
-        if next_field == "Timeline":
-            timeline_responses = [
-                f"{transition}Just so I can understand your situation a bit better, {next_question.lower()}",
-                f"{transition}This helps me prioritize properties for you - {next_question.lower()}",
-                f"{transition}No pressure at all, but {next_question.lower()}"
-            ]
-            response = random.choice(timeline_responses)
+        Focus on gathering information about: {remaining_fields[0] if remaining_fields else 'any remaining details'}
+        
+        Keep responses short and engaging. Avoid starting with phrases like "I understand" or "Thanks for sharing" unless the information is particularly significant."""
+        
+        try:
+            conversation_response = self.llm.invoke(conversation_prompt)
+            response = conversation_response.content if hasattr(conversation_response, 'content') else str(conversation_response)
             
-        # For contact information, be more considerate
-        if next_field in ["Email", "Phone"]:
-            contact_responses = [
-                f"{transition}When we find some great options, what's the best way to reach you?",
-                f"{transition}I'd like to send you some property details when we find matches. What's your preferred contact method?",
-                f"{transition}To make sure you don't miss out on new listings that match your criteria, what's the best way to contact you?"
-            ]
-            response = random.choice(contact_responses)
-                
-        self.last_question_field = next_field
+            # Update the last question field based on the response
+            for field in remaining_fields:
+                if field.lower() in response.lower():
+                    self.last_question_field = field
+                    break
+                    
+        except Exception as e:
+            print(f"Error generating conversation response: {e}")
+            # Fallback to template-based response if LLM fails
+            if remaining_fields:
+                next_field = remaining_fields[0]
+                response = self._get_question_for_field(next_field)
+                self.last_question_field = next_field
+            else:
+                response = "Is there anything else you'd like to tell me about your property needs?"
+        
         self.memory.append(AIMessage(content=response))
         return response
-        
+
     def _get_question_for_field(self, field):
         """Get a natural-sounding question for a specific field"""
         # Map fields to their questions with more conversational variations
@@ -614,7 +637,18 @@ class RealEstateAgent:
         Log the lead information to Google Sheets
         """
         try:
-            log_lead(
+            print("\n=== Logging to Google Sheets ===")
+            print(f"Lead Type: {self.lead_type}")
+            print(f"Interest Level: {self.required_fields['Interest Level']}")
+            print(f"Status: {self.required_fields['Status']}")
+            
+            # Log all fields being sent
+            print("\nFields being logged:")
+            for field, value in self.required_fields.items():
+                if value is not None:
+                    print(f"{field}: {value}")
+            
+            success = log_lead(
                 uid=self.required_fields["UID"],
                 name=self.required_fields["Name"],
                 email=self.required_fields["Email"],
@@ -642,9 +676,19 @@ class RealEstateAgent:
                 lead_source=self.required_fields["Lead Source"],
                 competitors=self.required_fields["Competitors"]
             )
-            return True
+            
+            if success:
+                print("\nSuccessfully logged lead to Google Sheets!")
+            else:
+                print("\nFailed to log lead to Google Sheets")
+            
+            return success
         except Exception as e:
-            print(f"Error logging to Google Sheets: {e}")
+            print(f"\nError logging to Google Sheets: {str(e)}")
+            print("Error details:", e.__class__.__name__)
+            import traceback
+            print("Full traceback:")
+            print(traceback.format_exc())
             return False
 
     def _determine_interest_level(self):
