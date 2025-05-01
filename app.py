@@ -8,6 +8,8 @@ import json
 from speech import speak, listen
 import os
 from dotenv import load_dotenv
+import base64
+from io import BytesIO
 
 # Load environment variables
 load_dotenv()
@@ -15,6 +17,21 @@ load_dotenv()
 # Initialize ElevenLabs
 from elevenlabs import ElevenLabs
 client = ElevenLabs(api_key=os.getenv("ELEVENLABS_API_KEY"))
+
+@st.cache_data
+def get_audio_base64(audio_data):
+    """Convert audio data to base64 for embedding"""
+    return base64.b64encode(audio_data).decode()
+
+def play_audio(audio_data):
+    """Create an audio player with autoplay"""
+    audio_base64 = get_audio_base64(audio_data)
+    audio_html = f"""
+        <audio autoplay style="display:none">
+            <source src="data:audio/mp3;base64,{audio_base64}" type="audio/mp3">
+        </audio>
+    """
+    st.markdown(audio_html, unsafe_allow_html=True)
 
 def validate_phone(phone):
     # Remove any non-digit characters
@@ -32,7 +49,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# Add custom CSS
+# Add custom CSS and JavaScript
 st.markdown("""
     <style>
     .stTextInput>div>div>input {
@@ -55,11 +72,19 @@ st.markdown("""
     .voice-button:hover {
         background-color: #1976D2 !important;
     }
-    /* Make audio player visible */
+    /* Hide audio player controls */
     .stAudio {
-        display: block !important;
+        display: none !important;
     }
     </style>
+    <script>
+    function playAudio(audioData) {
+        const audio = new Audio('data:audio/mp3;base64,' + audioData);
+        audio.play().catch(function(error) {
+            console.log("Audio playback failed:", error);
+        });
+    }
+    </script>
 """, unsafe_allow_html=True)
 
 # Initialize session state
@@ -69,6 +94,8 @@ if 'agent' not in st.session_state:
     st.session_state.agent = None
 if 'messages' not in st.session_state:
     st.session_state.messages = []
+if 'last_played_index' not in st.session_state:
+    st.session_state.last_played_index = -1
 if 'voice_enabled' not in st.session_state:
     st.session_state.voice_enabled = True  # Enable voice by default
 if 'voice_settings' not in st.session_state:
@@ -147,13 +174,8 @@ else:
                 "audio": audio_data
             })
             # Play the initial greeting
-            st.audio(audio_data, format="audio/mp3", start_time=0)
-            # Add HTML audio element for autoplay
-            st.markdown(f"""
-                <audio autoplay>
-                    <source src="data:audio/mp3;base64,{audio_data.hex()}" type="audio/mp3">
-                </audio>
-            """, unsafe_allow_html=True)
+            play_audio(audio_data)
+            st.session_state.last_played_index = 0
         else:
             print("[DEBUG] Failed to generate initial greeting audio")
             st.session_state.messages.append({
@@ -161,19 +183,14 @@ else:
                 "content": initial_message
             })
 
-    chat_container = st.container()
-    with chat_container:
-        for message in st.session_state.messages:
-            with st.chat_message(message["role"]):
-                st.markdown(message["content"])
-                if message["role"] == "assistant" and "audio" in message:
-                    st.audio(message["audio"], format="audio/mp3", start_time=0)
-                    # Add HTML audio element for autoplay
-                    st.markdown(f"""
-                        <audio autoplay>
-                            <source src="data:audio/mp3;base64,{message['audio'].hex()}" type="audio/mp3">
-                        </audio>
-                    """, unsafe_allow_html=True)
+    # Display messages with audio
+    for i, message in enumerate(st.session_state.messages):
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+            # Only play new messages
+            if message["role"] == "assistant" and "audio" in message and i > st.session_state.last_played_index:
+                play_audio(message["audio"])
+                st.session_state.last_played_index = i
 
     # Voice input button
     if st.session_state.voice_enabled:
@@ -200,8 +217,6 @@ else:
                         })
                         with st.chat_message("assistant"):
                             st.markdown(response)
-                            # Auto-play the response
-                            st.audio(audio_data, format="audio/mp3", start_time=0)
                         
                         # Check if we have enough information to log
                         if st.session_state.agent.is_ready_to_log():
@@ -230,8 +245,6 @@ else:
         })
         with st.chat_message("assistant"):
             st.markdown(response)
-            # Auto-play the response
-            st.audio(audio_data, format="audio/mp3", start_time=0)
         
         # Check if we have enough information to log
         if st.session_state.agent.is_ready_to_log():
