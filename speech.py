@@ -15,6 +15,9 @@ client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
 # Store the last speech recognition result
 last_recognition_result = None
 
+# Store success state in a global variable
+_last_speak_success = None
+
 __all__ = ['speak', 'listen']
 
 def speak(text, voice_id="21m00Tcm4TlvDq8ikWAM"):  # Default to Rachel voice
@@ -22,6 +25,7 @@ def speak(text, voice_id="21m00Tcm4TlvDq8ikWAM"):  # Default to Rachel voice
     Convert text to speech using ElevenLabs API and return audio data for Streamlit.
     Uses the latest API parameters for optimal quality and performance.
     """
+    global _last_speak_success
     try:
         print(f"[TTS] Starting text-to-speech conversion for text: {text[:50]}...")
         print(f"[TTS] Using voice ID: {voice_id}")
@@ -63,6 +67,7 @@ def speak(text, voice_id="21m00Tcm4TlvDq8ikWAM"):  # Default to Rachel voice
             print("[TTS] Cleaned up temporary file")
         
         print("[TTS] Successfully generated audio data")
+        _last_speak_success = True
         return audio_data
             
     except Exception as e:
@@ -70,15 +75,29 @@ def speak(text, voice_id="21m00Tcm4TlvDq8ikWAM"):  # Default to Rachel voice
         print(f"[TTS ERROR] Error type: {type(e)}")
         import traceback
         print(f"[TTS ERROR] Traceback: {traceback.format_exc()}")
+        _last_speak_success = False
         return None
 
-def listen(timeout=5, phrase_time_limit=10):
+def get_last_speak_status():
+    """
+    Returns the success status of the last speak operation.
+    """
+    global _last_speak_success
+    return _last_speak_success if '_last_speak_success' in globals() else False
+
+def listen(timeout=5, phrase_time_limit=10, wait_for_audio=True):
     """
     Listen to the user's speech using microphone and convert to text using ElevenLabs.
     Returns the transcribed text as a string, while storing additional information in last_recognition_result.
     """
     global last_recognition_result
     recognizer = sr.Recognizer()
+    
+    # Wait for audio to finish if requested
+    if wait_for_audio:
+        import time
+        time.sleep(2)  # Give a small buffer for audio to finish
+        
     with sr.Microphone() as source:
         print("🎤 Listening... (Speak now)")
         try:
@@ -141,7 +160,8 @@ def get_last_recognition_details():
 if __name__ == "__main__":
     # Test the functions
     audio_data = speak("Hello, this is a test.")
-    response = listen()
-    print(f"Response: {response}")
-    if last_recognition_result:
-        print("Full details:", last_recognition_result)
+    if get_last_speak_status():
+        response = listen()
+        print(f"Response: {response}")
+        if last_recognition_result:
+            print("Full details:", last_recognition_result)
